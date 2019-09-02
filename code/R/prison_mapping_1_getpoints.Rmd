@@ -1,0 +1,189 @@
+---
+title: "Prison mapping step 1: get points"
+date: "`r Sys.Date()`"
+output:
+  github_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Description
+
+Get polygon center points, calculate distances, and get group center points.
+
+### 0 - Load packages
+
+```{r message=FALSE}
+
+library(sf)
+library(nngeo)
+library(dplyr)
+library(readr)
+
+```
+
+### I - Get data
+
+* Filtered out Juvenile and Closed facilities
+```{r}
+
+prison_bdys <- st_read("../../data/gis/prison_bdys.geojson", 
+                       stringsAsFactors = FALSE, quiet = TRUE) %>% 
+  filter(STATUS != "CLOSED", SECURELVL != "JUVENILE") %>% 
+  select(FID:COUNTYFIPS, SECURELVL:CAPACITY)
+
+prison_bdys
+
+```
+
+* Some stats
+
+```{r}
+
+table(prison_bdys$STATUS, prison_bdys$TYPE)
+
+table(prison_bdys$STATUS, prison_bdys$SECURELVL)
+
+```
+
+### II - Calculate distances, create centroids and groups
+
+* Work in a projected coordinate system ([EPSG:2163](https://epsg.io/2163)) 
+
+```{r warning=FALSE}
+
+prison_ctrs <- prison_bdys %>% 
+  st_transform(crs = 2163) %>% 
+  st_centroid()
+
+st_crs(prison_ctrs)
+
+```
+
+* Visualize extent
+```{r}
+
+plot(prison_ctrs["STATE"], key.pos = NULL, 
+     main = "Prison Facilities (projected CRS)")
+
+```
+
+
+1. Calculate nearest distances, add to prison_ctrs data frame 
+
+* *(For potential later use: e.g., identifying relatively isolated facilities > some cutoff distance)*
+
+```{r}
+
+nearest_1 <- st_nn(prison_ctrs, prison_ctrs, k = 2, returnDist = TRUE)
+
+nearest_1_id <- nearest_1[["nn"]]
+nearest_1_id <- do.call(rbind, nearest_1_id)[,2]
+nearest_1_facid <- prison_ctrs[nearest_1_id, ]$FACILITYID
+nearest_1_facid <- data.frame(nearest_1_id, nearest_1_facid, stringsAsFactors = FALSE)
+
+nearest_1_dist <- nearest_1[["dist"]][,2]
+nearest_1_dat <- cbind(nearest_1_facid, nearest_1_dist)
+
+prison_ctrs <- st_sf(data.frame(prison_ctrs, nearest_1_dat))
+
+```
+
+
+2. Make groups based on hierarchical clustering, for aggregating near points to get a centroid (reduces the number of images since some facilities are near/next to each other)
+
+* Note there doesn't seem to be a grouping variable for prison facilities even though some are clearly part of the same complex
+
+* Adapted from: https://stackoverflow.com/questions/26540831/how-to-cluster-points-and-plot
+
+* Choosing 1 km, so h = 1000
+
+```{r}
+
+prison_ctrs_coords <- prison_ctrs %>% st_coordinates()
+
+dend <- hclust(dist(prison_ctrs_coords), method = "complete")
+
+groups <- cutree(dend, h = 1000)
+
+# number of facilities
+length(groups)
+
+# number of images (eventually)
+max(groups)
+
+prison_ctrs_coordgroups <- 
+  tibble(FACILITYID = prison_ctrs$FACILITYID, 
+         X = prison_ctrs_coords[,1], 
+         Y = prison_ctrs_coords[,2], 
+         group = groups) %>% 
+  arrange(group, FACILITYID)
+
+head(prison_ctrs_coordgroups)
+
+```
+
+* Loop to get bounding box center points for each group
+
+```{r}
+
+max_group <- max(prison_ctrs_coordgroups$group)
+
+group_cp <- list()
+
+for(i in 1:max_group) {
+  
+  pts <- prison_ctrs_coordgroups %>% filter(group == i)
+  pts_sf <- st_as_sf(pts, coords = c("X","Y"))
+  pts_ext <- st_bbox(pts_sf)
+  pts_ext_cp <- c(mean(pts_ext[c(1, 3)]), mean(pts_ext[c(2, 4)]))
+  group_cp[[i]] <- cbind(group = i, cp_X = pts_ext_cp[1], cp_Y = pts_ext_cp[2])
+  
+}
+
+group_cp_df <- do.call(rbind, group_cp) %>% as_tibble()
+
+
+prison_ctrs_coordgroups <- left_join(prison_ctrs_coordgroups, 
+                                           group_cp_df, by = "group")
+
+```
+
+
+* Quick test if they work
+
+```{r}
+
+prison_ctrs_coordgroups %>% group_by(group) %>% 
+  tally() %>% arrange(-n) %>% slice(1:5)
+
+# pick one, the center point should be in the middle of the facility centroids
+
+plot(prison_ctrs_coordgroups[prison_ctrs_coordgroups$group == 79,]$Y, 
+     prison_ctrs_coordgroups[prison_ctrs_coordgroups$group == 79,]$X, 
+     xlab = "Longitude (m)", 
+     ylab = "Latitude (m)")
+points(prison_ctrs_coordgroups[prison_ctrs_coordgroups$group == 79,]$cp_Y, 
+       prison_ctrs_coordgroups[prison_ctrs_coordgroups$group == 79,]$cp_X,
+       col = "red", pch = 16)
+
+```
+
+* Export for further work (note that geojson crs should be 4326)
+
+```{r}
+
+prison_ctrs %>% st_transform(crs = 4326) %>% 
+  inner_join(., prison_ctrs_coordgroups, by = "FACILITYID") %>% 
+  st_write("exports/prison_ctrs_groups.geojson", delete_dsn = TRUE)
+
+```
+
+#### Next step: generating images with a basemap
+
+<br>
+
