@@ -1,0 +1,63 @@
+---
+title: "Prison mapping step 3: get data"
+date: "`r Sys.Date()`"
+output:
+  github_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Description
+
+Get ancillary data (land cover, etc.) for summary and analysis
+
+### 0 - Load packages
+
+
+```{r}
+
+library(sf)
+library(dplyr)
+library(readr)
+
+```
+
+
+### I - Get data
+
+```{r}
+
+prison_ctrs_groups <- st_read("exports/prison_ctrs_groups.geojson", 
+                              stringsAsFactors = FALSE, quiet = TRUE)
+
+```
+
+
+1. Export csv for Python GEE Notebook
+
+```{r}
+
+prison_ctrs_groups %>% 
+  st_drop_geometry() %>% 
+  select(STATE, group, cp_X, cp_Y) %>% 
+  distinct() %>% 
+  arrange(STATE, group) %>% 
+  st_as_sf(coords = c("cp_X", "cp_Y"), crs = 2163) %>% 
+  st_transform(crs = 4326) %>% 
+  cbind(st_coordinates(.)) %>% 
+  st_drop_geometry() %>% 
+  write_csv("exports/prison_ctrs_groups_latlon.csv")
+
+```
+
+
+NEXT STEP: After getting GEE data, import it
+
+
+
+
+
